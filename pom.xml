@@ -23,7 +23,12 @@
     <dependency>
       <groupId>com.amazonaws</groupId>
       <artifactId>aws-java-sdk</artifactId>
-      <version>1.8.11</version>
+      <version>1.11.301</version>
+    </dependency>
+    <dependency>
+      <groupId>com.wavefront</groupId>
+      <artifactId>dropwizard-metrics-3.1</artifactId>
+      <version>4.26</version>
     </dependency>
     <dependency>
       <groupId>junit</groupId>
