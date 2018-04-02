@@ -83,6 +83,7 @@ public class Scanner {
     es.submit(() -> {
       System.out.println("Reading S3 objects...");
       String continuationToken = null;
+      int total = 0;
       do {
         Timer.Context time = listTimer.time();
         try {
@@ -103,7 +104,8 @@ public class Scanner {
           time.stop();
         }
       } while (continuationToken != null);
-      System.out.println("Found " + s3ObjectSummaries.size() + " objects.");
+      System.out.println("Found " + total + " objects.");
+      System.out.println("Already read " + (total - s3ObjectSummaries.size()) + " objects.");
       done.set(true);
     });
 
