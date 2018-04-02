@@ -76,7 +76,7 @@ public class Scanner {
     Timer parseTimer = mr.timer("s3scanner.parsing");
 
     ExecutorService es = Executors.newFixedThreadPool(concurrency + 1);
-    Queue<S3ObjectSummary> s3ObjectSummaries = new ConcurrentLinkedQueue<>();
+    BlockingQueue<S3ObjectSummary> s3ObjectSummaries = new LinkedBlockingDeque<>();
 
     AtomicBoolean done = new AtomicBoolean(false);
 
@@ -113,7 +113,7 @@ public class Scanner {
     AtomicLong count = new AtomicLong();
     Semaphore semaphore = new Semaphore(concurrency);
     while (!done.get() || s3ObjectSummaries.size() > 0) {
-      S3ObjectSummary s3ObjectSummary = s3ObjectSummaries.poll();
+      S3ObjectSummary s3ObjectSummary = s3ObjectSummaries.take();
       semaphore.acquire();
       es.submit(() -> {
         Timer.Context time = getTimer.time();
