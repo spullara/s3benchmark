@@ -1,12 +1,9 @@
 package com.sampullara.s3;
 
 import com.amazonaws.ClientConfiguration;
-import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
-import com.amazonaws.services.s3.S3ClientOptions;
 import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.PutObjectRequest;
@@ -37,19 +34,21 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class App {
 
+  private final ExecutorService es = Executors.newCachedThreadPool();
   @Argument(alias = "m", description = "Base multiplier on processors")
   Integer multiplier = 10;
-
   @Argument(alias = "r", description = "Range in multiples of 5 added to based concurrency")
   Integer range = 10;
-
   @Argument(alias = "w", description = "Number of writes to attempt per iteration")
   Integer writes = 100;
-
   @Argument(alias = "b", description = "Bucket name", required = true)
   String bucket;
 
-  private final ExecutorService es = Executors.newCachedThreadPool();
+  public static void main(String[] args) throws UnknownHostException {
+    App s3PerfTest = new App();
+    Args.parseOrExit(s3PerfTest, args);
+    s3PerfTest.testS3Client();
+  }
 
   public void testS3Client() throws UnknownHostException {
 
@@ -61,7 +60,7 @@ public class App {
             .withSource(InetAddress.getLocalHost().getHostName())
             .withPointTag("service", "s3benchmark")
             .build("wavefront.sampullara.com", 2878)
-            .start(1, TimeUnit.MINUTES);
+            .start(5, TimeUnit.SECONDS);
 
     Timer putLatency = mr.timer("s3benchmark.put.latency");
     Timer getLatency = mr.timer("s3benchmark.get.latency");
@@ -70,12 +69,14 @@ public class App {
     Random random = new Random();
     AtomicInteger concurrencyGauge = new AtomicInteger(0);
     mr.register("s3benchmark.concurrency", (Gauge<Integer>) concurrencyGauge::get);
+    AtomicInteger size = new AtomicInteger(0);
+    mr.register("s3benchmark.put.size", (Gauge<Integer>) size::get);
 
     for (int j = 0; j < range; j++) {
       Set<String> keys = new HashSet<>();
       int concurrency = Runtime.getRuntime().availableProcessors() * multiplier + j * 5;
       concurrencyGauge.set(concurrency);
-      
+
       ClientConfiguration cc = new ClientConfiguration();
       cc.setConnectionTimeout(1000);
       cc.setMaxConnections(concurrency);
@@ -83,14 +84,12 @@ public class App {
       cc.setUseGzip(false);
       cc.setUseReaper(true);
       cc.setMaxErrorRetry(5);
-      cc.setPreemptiveBasicProxyAuth(true);
+//      cc.setPreemptiveBasicProxyAuth(true);
       cc.setConnectionTTL(60000);
       AmazonS3 s3c = AmazonS3ClientBuilder.standard()
               .withClientConfiguration(cc)
-              .withRegion("us-west-2")
+              .withRegion(Regions.US_WEST_2)
               .build();
-      AtomicInteger size = new AtomicInteger(0);
-      mr.register("s3benchmark.put.size", (Gauge<Integer>) size::get);
 
       Semaphore semaphore = new Semaphore(concurrency);
       for (int n = 0; n < 100; n += 10) {
@@ -99,19 +98,25 @@ public class App {
         size.set(totalBytes);
         byte[] bytes = new byte[totalBytes];
         random.nextBytes(bytes);
-        ObjectMetadata metadata = new ObjectMetadata();
-        metadata.setContentLength(bytes.length);
         for (int i = 0; i < writes; i++) {
           final String s = reverse(UUID.randomUUID().toString());
           keys.add(s);
           semaphore.acquireUninterruptibly();
           es.submit(() -> {
             Timer.Context time = putLatency.time();
-            PutObjectRequest por = new PutObjectRequest(bucket, s, new ByteArrayInputStream(bytes), metadata);
-            s3c.putObject(por);
-            semaphore.release();
-            time.stop();
-            putBytes.inc(bytes.length);
+            try {
+              ObjectMetadata metadata = new ObjectMetadata();
+              metadata.setContentLength(bytes.length);
+              PutObjectRequest por = new PutObjectRequest(bucket, s, new ByteArrayInputStream(bytes), metadata);
+              s3c.putObject(por);
+              putBytes.inc(bytes.length);
+            } catch (Throwable e) {
+              e.printStackTrace();
+              System.exit(1);
+            } finally {
+              semaphore.release();
+              time.stop();
+            }
           });
         }
         semaphore.acquireUninterruptibly(concurrency);
@@ -146,16 +151,10 @@ public class App {
       semaphore.acquireUninterruptibly(concurrency);
       semaphore.release(concurrency);
       long diff = System.currentTimeMillis() - start;
-      System.out.println("concurrency: " + concurrency + " doing " + keys.size() + " of " + (totalBytes.get() / keys.size()) + " bytes in " + diff + " ms: " + ((1000 * keys.size()) / diff) + " r/s");
+      System.out.println("concurrency: " + concurrency + " doing " + keys.size() + " reads of " + (totalBytes.get() / keys.size()) + " bytes in " + diff + " ms: " + ((1000 * keys.size()) / diff) + " r/s");
     }
 
     System.exit(0);
-  }
-
-  public static void main(String[] args) throws UnknownHostException {
-    App s3PerfTest = new App();
-    Args.parseOrExit(s3PerfTest, args);
-    s3PerfTest.testS3Client();
   }
 
   private String reverse(String s) {
