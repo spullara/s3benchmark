@@ -15,7 +15,6 @@ import org.codehaus.jackson.JsonParser;
 import org.codehaus.jackson.map.MappingJsonFactory;
 
 import java.io.BufferedReader;
-import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
@@ -23,6 +22,7 @@ import java.net.UnknownHostException;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.GZIPInputStream;
 
@@ -75,37 +75,43 @@ public class Scanner {
     Timer listTimer = mr.timer("s3scanner.list");
     Timer parseTimer = mr.timer("s3scanner.parsing");
 
-    ExecutorService es = Executors.newFixedThreadPool(concurrency);
+    ExecutorService es = Executors.newFixedThreadPool(concurrency + 1);
     Queue<S3ObjectSummary> s3ObjectSummaries = new ConcurrentLinkedQueue<>();
 
-    System.out.println("Reading S3 objects...");
-    String continuationToken = null;
-    do {
-      Timer.Context time = listTimer.time();
-      try {
-        ListObjectsV2Result objectListing;
-        if (continuationToken == null) {
-          objectListing = s3c.listObjectsV2(bucket, path);
-        } else {
-          objectListing = s3c.listObjectsV2(new ListObjectsV2Request()
-                  .withBucketName(bucket)
-                  .withPrefix(path)
-                  .withContinuationToken(continuationToken));
+    AtomicBoolean done = new AtomicBoolean(false);
+
+    es.submit(() -> {
+      System.out.println("Reading S3 objects...");
+      String continuationToken = null;
+      do {
+        Timer.Context time = listTimer.time();
+        try {
+          ListObjectsV2Result objectListing;
+          if (continuationToken == null) {
+            objectListing = s3c.listObjectsV2(bucket, path);
+          } else {
+            objectListing = s3c.listObjectsV2(new ListObjectsV2Request()
+                    .withBucketName(bucket)
+                    .withPrefix(path)
+                    .withContinuationToken(continuationToken));
+          }
+          List<S3ObjectSummary> objectSummaries = objectListing.getObjectSummaries();
+          s3ObjectSummaries.addAll(objectSummaries);
+          objectsCounter.inc(objectSummaries.size());
+          continuationToken = objectListing.getNextContinuationToken();
+        } finally {
+          time.stop();
         }
-        List<S3ObjectSummary> objectSummaries = objectListing.getObjectSummaries();
-        s3ObjectSummaries.addAll(objectSummaries);
-        objectsCounter.inc(objectSummaries.size());
-        continuationToken = objectListing.getNextContinuationToken();
-      } finally {
-        time.stop();
-      }
-    } while (continuationToken != null);
-    System.out.println("Found " + s3ObjectSummaries.size() + " objects.");
+      } while (continuationToken != null);
+      System.out.println("Found " + s3ObjectSummaries.size() + " objects.");
+      done.set(true);
+    });
 
     MappingJsonFactory mf = new MappingJsonFactory();
     AtomicLong count = new AtomicLong();
     Semaphore semaphore = new Semaphore(concurrency);
-    for (S3ObjectSummary s3ObjectSummary : s3ObjectSummaries) {
+    while (!done.get() || s3ObjectSummaries.size() > 0) {
+      S3ObjectSummary s3ObjectSummary = s3ObjectSummaries.poll();
       semaphore.acquire();
       es.submit(() -> {
         Timer.Context time = getTimer.time();
@@ -119,8 +125,8 @@ public class Scanner {
             uncompressedBytesCounter.inc(line.length() + 1);
             Timer.Context parseTime = parseTimer.time();
             try {
-//              JsonParser jsonParser = mf.createJsonParser(line);
-//              jsonParser.readValueAsTree();
+              JsonParser jsonParser = mf.createJsonParser(line);
+              jsonParser.readValueAsTree();
               count.incrementAndGet();
             } finally {
               parseTime.stop();
