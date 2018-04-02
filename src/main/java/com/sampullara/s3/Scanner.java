@@ -49,7 +49,7 @@ public class Scanner {
     WavefrontReporter.forRegistry(mr)
             .withJvmMetrics()
             .withSource(InetAddress.getLocalHost().getHostName())
-            .withPointTag("service", "s3benchmark")
+            .withPointTag("service", "s3scanner")
             .build("wavefront.sampullara.com", 2878)
             .start(5, TimeUnit.SECONDS);
 
@@ -68,7 +68,9 @@ public class Scanner {
             .withRegion(Regions.fromName(region))
             .build();
 
-    Counter counter = mr.counter("s3scanner.objects");
+    Counter objectsCounter = mr.counter("s3scanner.objects");
+    Counter compressedBytesCounter = mr.counter("s3scanner.bytes.compressed");
+    Counter uncompressedBytesCounter = mr.counter("s3scanner.bytes.uncompressed");
     Timer getTimer = mr.timer("s3scanner.get");
     Timer listTimer = mr.timer("s3scanner.list");
     Timer parseTimer = mr.timer("s3scanner.parsing");
@@ -92,7 +94,7 @@ public class Scanner {
         }
         List<S3ObjectSummary> objectSummaries = objectListing.getObjectSummaries();
         s3ObjectSummaries.addAll(objectSummaries);
-        counter.inc(objectSummaries.size());
+        objectsCounter.inc(objectSummaries.size());
         continuationToken = objectListing.getNextContinuationToken();
       } finally {
         time.stop();
@@ -109,15 +111,20 @@ public class Scanner {
         Timer.Context time = getTimer.time();
         try {
           S3Object object = s3c.getObject(new GetObjectRequest(s3ObjectSummary.getBucketName(), s3ObjectSummary.getKey()));
+          compressedBytesCounter.inc(object.getObjectMetadata().getContentLength());
           InputStream gis = new GZIPInputStream(object.getObjectContent());
           BufferedReader br = new BufferedReader(new InputStreamReader(gis, "UTF-8"));
           String line;
           while ((line = br.readLine()) != null) {
+            uncompressedBytesCounter.inc(line.length() + 1);
             Timer.Context parseTime = parseTimer.time();
-            JsonParser jsonParser = mf.createJsonParser(line);
-            jsonParser.readValueAsTree();
-            count.incrementAndGet();
-            parseTime.stop();
+            try {
+//              JsonParser jsonParser = mf.createJsonParser(line);
+//              jsonParser.readValueAsTree();
+              count.incrementAndGet();
+            } finally {
+              parseTime.stop();
+            }
           }
         } catch (Exception e) {
           System.out.println("Error reading: " + s3ObjectSummary.getKey());
@@ -129,6 +136,7 @@ public class Scanner {
       });
     }
     semaphore.acquire(concurrency);
+    es.shutdownNow();
 
     return count.get();
   }
